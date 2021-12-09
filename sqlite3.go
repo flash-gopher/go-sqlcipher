@@ -4,6 +4,7 @@
 // Use of this source code is governed by an MIT-style
 // license that can be found in the LICENSE file.
 
+//go:build cgo
 // +build cgo
 
 package sqlite3
@@ -1042,6 +1043,7 @@ func (d *SQLiteDriver) Open(dsn string) (driver.Conn, error) {
 	synchronousMode := "NORMAL"
 	writableSchema := -1
 	vfsName := ""
+	var cacheSize *int64
 
 	// SQLCipher PRAGMA's
 	pragmaKey := ""
@@ -1367,6 +1369,18 @@ func (d *SQLiteDriver) Open(dsn string) (driver.Conn, error) {
 			default:
 				return nil, fmt.Errorf("Invalid _writable_schema: %v, expecting boolean value of '0 1 false true no yes off on'", val)
 			}
+		}
+
+		// Cache size (_cache_size)
+		//
+		// https://sqlite.org/pragma.html#pragma_cache_size
+		//
+		if val := params.Get("_cache_size"); val != "" {
+			iv, err := strconv.ParseInt(val, 10, 64)
+			if err != nil {
+				return nil, fmt.Errorf("Invalid _cache_size: %v: %v", val, err)
+			}
+			cacheSize = &iv
 		}
 
 		if val := params.Get("vfs"); val != "" {
@@ -1702,13 +1716,21 @@ func (d *SQLiteDriver) Open(dsn string) (driver.Conn, error) {
 	//
 	// Because default is NORMAL this statement is always executed
 	if err := exec(fmt.Sprintf("PRAGMA synchronous = %s;", synchronousMode)); err != nil {
-		C.sqlite3_close_v2(db)
+		conn.Close()
 		return nil, err
 	}
 
 	// Writable Schema
 	if writableSchema > -1 {
 		if err := exec(fmt.Sprintf("PRAGMA writable_schema = %d;", writableSchema)); err != nil {
+			C.sqlite3_close_v2(db)
+			return nil, err
+		}
+	}
+
+	// Cache Size
+	if cacheSize != nil {
+		if err := exec(fmt.Sprintf("PRAGMA cache_size = %d;", *cacheSize)); err != nil {
 			C.sqlite3_close_v2(db)
 			return nil, err
 		}
@@ -2023,6 +2045,13 @@ func (s *SQLiteStmt) execSync(args []namedValue) (driver.Result, error) {
 	}
 
 	return &SQLiteResult{id: int64(rowid), changes: int64(changes)}, nil
+}
+
+// Readonly reports if this statement is considered readonly by SQLite.
+//
+// See: https://sqlite.org/c3ref/stmt_readonly.html
+func (s *SQLiteStmt) Readonly() bool {
+	return C.sqlite3_stmt_readonly(s.s) == 1
 }
 
 // Close the rows.
